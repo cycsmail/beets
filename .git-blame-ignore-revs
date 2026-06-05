@@ -203,3 +203,9 @@ ca8544d4bcab503e1e4c2cd6688655c8211aa7a1
 d0dc5f86a626765c86cdadc348595429f4c6e6ef
 # Enable and fix flake8-builtins
 b7974ace83ab193b6417bdcecaf68a742bf5a1a8
+# Preserve importer config views
+b2fa5e0ece443900b38449b3a74d946575d9390b
+# Type _reduce_and_log
+13f77224db23c300fb4782f7b38620ff5ba7045f
+# Add missing types to beets.importer
+f78b8cf3835b2ce5124325ba05be60713991d603
