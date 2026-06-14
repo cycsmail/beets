@@ -63,6 +63,7 @@ if TYPE_CHECKING:
         KeysView,
         Sequence,
     )
+    from pathlib import Path
     from sqlite3 import Connection
     from types import TracebackType
 
@@ -1022,6 +1023,7 @@ class Migration(ABC):
     """Define a one-time data migration that runs during database startup."""
 
     CHUNK_SIZE: ClassVar[int] = 1000
+    _backup_created: ClassVar[bool] = False
 
     db: Database
 
@@ -1045,6 +1047,16 @@ class Migration(ABC):
         """Run this migration once for a model's backing table."""
         table = model_cls._table
         if not self.db.migration_exists(self.name, table):
+            if not Migration._backup_created and beets.config[
+                "create_backup_before_migrations"
+            ].get(bool):
+                ts = time.strftime("%Y%m%d_%H%M%S")
+                dest = os.fsdecode(self.db.path) + f".{ts}.bak"
+                self.db.create_copy(dest)
+                from beets import ui
+
+                ui.print_(f"Created database backup at: {dest!r}")
+                Migration._backup_created = True
             self._migrate_data(model_cls, *args, **kwargs)
             self.db.record_migration(self.name, table)
 
@@ -1353,6 +1365,15 @@ class Database:
                 migration.migrate_model(
                     model_cls, self.db_tables[model_cls._table]["columns"]
                 )
+
+    def create_copy(self, dest: str | Path) -> None:
+        """Create a copy of the database at `dest`."""
+        if not os.path.isfile(self.path):
+            # Maybe we should raise here
+            return
+        import shutil
+
+        shutil.copy2(self.path, dest)
 
     def migration_exists(self, name: str, table: str) -> bool:
         """Return whether a named migration has been marked complete."""

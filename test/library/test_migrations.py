@@ -5,6 +5,7 @@ from typing import ClassVar
 import pytest
 
 from beets.dbcore import types
+from beets.dbcore.db import Migration
 from beets.library import migrations
 from beets.library.models import Album, Item
 from beets.test.helper import TestHelper
@@ -284,3 +285,45 @@ class TestRelativePathMigration:
         str_item = helper.lib.get_item(2)
         assert str_item
         assert str_item.path == abs_bytes_path
+
+
+class TestMigrationBackup:
+    """Tests for the backup-before-migration feature."""
+
+    @pytest.fixture
+    def helper(self, monkeypatch):
+        monkeypatch.setattr("beets.library.library.Library._migrations", ())
+        monkeypatch.setattr(
+            "beets.library.models.Item._fields",
+            {**Item._fields, "lyrics": types.STRING},
+        )
+        helper = TestHelper()
+        helper.db_on_disk = True
+        helper.setup_beets()
+
+        monkeypatch.setattr(
+            "beets.library.library.Library._migrations",
+            ((migrations.LyricsMetadataInFlexFieldsMigration, (Item,)),),
+        )
+        yield helper
+        helper.teardown_beets()
+
+    @pytest.mark.parametrize(
+        "config_value, expected_count", [(True, 1), (False, 0)]
+    )
+    def test_backup_config(
+        self, helper: TestHelper, config_value, expected_count
+    ):
+        Migration._backup_created = False
+        helper.config["create_backup_before_migrations"] = config_value
+        helper.add_item(lyrics="some lyrics")
+        db_path = helper.lib.path
+
+        helper.lib._migrate()
+
+        backups = [
+            f
+            for f in os.listdir(os.path.dirname(db_path))
+            if f.endswith(b".bak")
+        ]
+        assert len(backups) == expected_count
