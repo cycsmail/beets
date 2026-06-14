@@ -27,6 +27,9 @@ New features
   :conf:`plugins.musicbrainz:aliases_as_credits` to make
   aliases-as-artist-credit optional.
 - :doc:`plugins/badfiles`: Added settings for auto error and warning actions.
+- A database backup is now automatically created before running schema
+  migrations. Enable with the :conf:`create_backup_before_migrations` option
+  (default: yes). The backup is timestamped and saved next to the database file.
 
 Bug fixes
 ~~~~~~~~~
