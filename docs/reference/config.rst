@@ -60,6 +60,13 @@ directory
 The directory to which files will be copied/moved when adding them to the
 library. Defaults to a folder called ``Music`` in your home directory.
 
+create_backup_before_migrations
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Either ``yes`` or ``no``, indicating whether a timestamped backup of the
+database file should be created before running any schema migrations. Defaults
+to ``yes``.
+
 .. _plugins-config:
 
 plugins
