@@ -1050,12 +1050,18 @@ class Migration(ABC):
             if not Migration._backup_created and beets.config[
                 "create_backup_before_migrations"
             ].get(bool):
-                ts = time.strftime("%Y%m%d_%H%M%S")
-                dest = os.fsdecode(self.db.path) + f".{ts}.bak"
-                self.db.create_copy(dest)
+                dest = os.fsdecode(self.db.path) + ".bak"
                 from beets import ui
 
-                ui.print_(f"Created database backup at: {dest!r}")
+                try:
+                    self.db.create_backup(dest)
+                    ui.print_(f"Created database backup at: {dest!r}")
+                except OSError as exc:
+                    ui.print_(
+                        f"Could not create database backup at {dest!r}: {exc}"
+                    )
+                finally:
+                    Migration._backup_created = True
                 Migration._backup_created = True
             self._migrate_data(model_cls, *args, **kwargs)
             self.db.record_migration(self.name, table)
@@ -1366,14 +1372,16 @@ class Database:
                     model_cls, self.db_tables[model_cls._table]["columns"]
                 )
 
-    def create_copy(self, dest: str | Path) -> None:
-        """Create a copy of the database at `dest`."""
+    def create_backup(self, dest: str | Path) -> None:
+        """Create a backup of the database at `dest`."""
         if not os.path.isfile(self.path):
-            # Maybe we should raise here
-            return
-        import shutil
-
-        shutil.copy2(self.path, dest)
+            raise FileNotFoundError(os.fspath(self.path))
+        # Use the SQLite backup API so the copy is consistent even when the
+        # database is open and may have a journal/WAL.
+        dest_conn = sqlite3.connect(os.fsdecode(dest))
+        with self.transaction():
+            self._connection().backup(dest_conn)
+        dest_conn.close()
 
     def migration_exists(self, name: str, table: str) -> bool:
         """Return whether a named migration has been marked complete."""

@@ -63,9 +63,10 @@ library. Defaults to a folder called ``Music`` in your home directory.
 create_backup_before_migrations
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Either ``yes`` or ``no``, indicating whether a timestamped backup of the
-database file should be created before running any schema migrations. Defaults
-to ``yes``.
+Either ``yes`` or ``no``, indicating whether a backup of the database file
+should be created before applying any pending schema migrations after a beets
+upgrade. The backup is only made when there are actually migrations to run.
+Defaults to ``yes``.
 
 .. _plugins-config:
 
