@@ -63,7 +63,6 @@ if TYPE_CHECKING:
         KeysView,
         Sequence,
     )
-    from pathlib import Path
     from sqlite3 import Connection
     from types import TracebackType
 
@@ -1023,7 +1022,6 @@ class Migration(ABC):
     """Define a one-time data migration that runs during database startup."""
 
     CHUNK_SIZE: ClassVar[int] = 1000
-    _backup_created: ClassVar[bool] = False
 
     db: Database
 
@@ -1047,24 +1045,18 @@ class Migration(ABC):
         """Run this migration once for a model's backing table."""
         table = model_cls._table
         if not self.db.migration_exists(self.name, table):
-            if not Migration._backup_created and beets.config[
-                "create_backup_before_migrations"
-            ].get(bool):
-                dest = os.fsdecode(self.db.path) + ".bak"
-                from beets import ui
-
-                try:
-                    self.db.create_backup(dest)
-                    ui.print_(f"Created database backup at: {dest!r}")
-                except OSError as exc:
-                    ui.print_(
-                        f"Could not create database backup at {dest!r}: {exc}"
-                    )
-                finally:
-                    Migration._backup_created = True
-                Migration._backup_created = True
+            self._before_migration_backup(table)
             self._migrate_data(model_cls, *args, **kwargs)
             self.db.record_migration(self.name, table)
+
+    def _before_migration_backup(self, table: str):
+        if not beets.config["create_backup_before_migrations"].get(bool):
+            return
+
+        dest = os.fsdecode(self.db.path) + f"-before-{table}-{self.name}.bak"
+        self.db.create_backup(dest)
+
+        print(f"Created database backup at: {dest!r}.")
 
     @abstractmethod
     def _migrate_data(
@@ -1372,13 +1364,11 @@ class Database:
                     model_cls, self.db_tables[model_cls._table]["columns"]
                 )
 
-    def create_backup(self, dest: str | Path) -> None:
+    def create_backup(self, dest: str) -> None:
         """Create a backup of the database at `dest`."""
-        if not os.path.isfile(self.path):
-            raise FileNotFoundError(os.fspath(self.path))
         # Use the SQLite backup API so the copy is consistent even when the
         # database is open and may have a journal/WAL.
-        dest_conn = sqlite3.connect(os.fsdecode(dest))
+        dest_conn = sqlite3.connect(dest)
         with self.transaction():
             self._connection().backup(dest_conn)
         dest_conn.close()
