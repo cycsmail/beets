@@ -38,13 +38,14 @@ if TYPE_CHECKING:
     from beets.dbcore import Results
     from beets.dbcore.query import FieldQuery, FieldQueryType
     from beets.dbcore.sort import FieldSort
+    from beets.util.functemplate import FieldTFuncs
     from beets.util.pathformats import PathFormat
 
     from .library import Library
 
 log = logging.getLogger("beets")
 
-AnyLibModel = TypeVar("AnyLibModel", "Album", "Item")
+AlbumOrItem = TypeVar("AlbumOrItem", "Album", "Item")
 
 
 class LibModel(dbcore.Model["Library"]):
@@ -82,7 +83,7 @@ class LibModel(dbcore.Model["Library"]):
         """The path to the entity as pathlib.Path."""
         return Path(os.fsdecode(self.path))
 
-    def _template_funcs(self) -> Mapping[str, Callable[[str], str]]:
+    def _template_funcs(self) -> FieldTFuncs:
         funcs = DefaultTemplateFunctions(self, self._db).functions()
         funcs.update(plugins.template_funcs())
         return funcs
@@ -91,9 +92,12 @@ class LibModel(dbcore.Model["Library"]):
         super().store(fields)
         plugins.send("database_change", lib=self.db, model=self)
 
-    def remove(self) -> None:
+    def _remove(self) -> None:
         super().remove()
         plugins.send("database_change", lib=self.db, model=self)
+
+    def remove(self, delete: bool = False) -> None:
+        raise NotImplementedError
 
     def add(self, lib: Library | None = None) -> None:
         # super().add() calls self.store(), which sends `database_change`,
@@ -386,7 +390,7 @@ class Album(LibModel):
 
         Set with_items to False to avoid removing the album's items.
         """
-        super().remove()
+        super()._remove()
 
         # Send a 'album_removed' signal to plugins
         plugins.send("album_removed", album=self)
@@ -1121,7 +1125,7 @@ class Item(LibModel):
         If `with_album`, then the item's album (if any) is removed
         if the item was the last in the album.
         """
-        super().remove()
+        super()._remove()
 
         # Remove the album if it is empty.
         if with_album:
@@ -1221,6 +1225,7 @@ class Item(LibModel):
         relative_to_libdir: bool = False,
         basedir: bytes | None = None,
         path_formats: list[PathFormat] | None = None,
+        extension: str | None = None,
     ) -> bytes:
         """Return the path in the library directory designated for the item
         (i.e., where the file ought to be).
@@ -1255,7 +1260,9 @@ class Item(LibModel):
             subpath = util.asciify_path(subpath)
 
         lib_path_str, fallback = util.legalize_path(
-            subpath, self.db.replacements, self.filepath.suffix
+            subpath,
+            self.db.replacements,
+            f".{extension}" if extension else self.filepath.suffix,
         )
         if fallback:
             # Print an error message if legalization fell back to
@@ -1308,7 +1315,7 @@ class DefaultTemplateFunctions:
         self.item = item
         self.lib = lib
 
-    def functions(self) -> dict[str, Callable[..., str]]:
+    def functions(self) -> dict[str, Callable[..., object]]:
         """Return a dictionary containing the functions defined in this
         object.
 
@@ -1408,7 +1415,8 @@ class DefaultTemplateFunctions:
         if memoval is not None:
             return memoval
 
-        album: Album = self.lib.get_album(album_id)  # type: ignore[assignment]
+        if not (album := self.lib.get_album(album_id)):
+            return ""
 
         return self._tmpl_unique(
             "aunique",

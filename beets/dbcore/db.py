@@ -11,7 +11,7 @@ import threading
 import time
 from abc import ABC, abstractmethod
 from collections import UserDict, defaultdict
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from functools import cached_property
@@ -26,6 +26,7 @@ from typing import (
     Literal,
     NamedTuple,
     TypedDict,
+    overload,
 )
 
 from typing_extensions import (
@@ -49,10 +50,11 @@ if TYPE_CHECKING:
         Iterable,
         Iterator,
         KeysView,
-        Sequence,
     )
     from sqlite3 import Connection
     from types import TracebackType
+
+    from beets.util.functemplate import FieldTFuncs
 
     from ..util import PathLike
     from .query import FieldQueryType, Query, SQLiteType
@@ -149,8 +151,8 @@ class FormattedMapping(Mapping[str, str]):
             value = value.decode("utf-8", "ignore")
 
         if self.for_path:
-            sep_repl: str = beets.config["path_sep_replace"].as_str()
-            sep_drive: str = beets.config["drive_sep_replace"].as_str()
+            sep_repl = beets.config["path_sep_replace"].as_str()
+            sep_drive = beets.config["drive_sep_replace"].as_str()
 
             if re.match(r"^[a-zA-Z]:", value):
                 value = re.sub(r"(?<=[a-zA-Z]):", sep_drive, value)
@@ -348,7 +350,7 @@ class Model(ABC, Generic[D]):
         # gather the getter mapping every time.
         raise NotImplementedError()
 
-    def _template_funcs(self) -> Mapping[str, Callable[[str], str]]:
+    def _template_funcs(self) -> FieldTFuncs:
         """Return a mapping from function names to text-transformer
         functions.
         """
@@ -653,7 +655,7 @@ class Model(ABC, Generic[D]):
                 f"DELETE FROM {self._flex_table} WHERE entity_id=?", (self.id,)
             )
 
-    def add(self, db: D | None = None):
+    def add(self, db: D | None = None) -> None:
         """Add the object to the library database. This object must be
         associated with a database; you can provide one via the `db`
         parameter or use the currently associated database.
@@ -681,7 +683,7 @@ class Model(ABC, Generic[D]):
 
     def formatted(
         self,
-        included_keys: str = FormattedMapping.ALL_KEYS,
+        included_keys: str | list[str] = FormattedMapping.ALL_KEYS,
         for_path: bool = False,
     ) -> FormattedMapping:
         """Get a mapping containing all values on this object formatted
@@ -729,7 +731,7 @@ class Model(ABC, Generic[D]):
 AnyModel = TypeVar("AnyModel", bound=Model)
 
 
-class Results(Generic[AnyModel]):
+class Results(Sequence[AnyModel]):
     """An item query result set. Iterating over the collection lazily
     constructs Model objects that reflect database rows.
     """
@@ -868,22 +870,29 @@ class Results(Generic[AnyModel]):
         """Does this result contain any objects?"""
         return bool(len(self))
 
-    def __getitem__(self, n: int) -> AnyModel:
-        """Get the nth item in this result set. This is inefficient: all
-        items up to n are materialized and thrown away.
-        """
+    @overload
+    def __getitem__(self, index: int) -> AnyModel: ...
+
+    @overload
+    def __getitem__(self, index: slice) -> list[AnyModel]: ...
+
+    def __getitem__(self, index: int | slice) -> AnyModel | list[AnyModel]:
+        """Return indexed or sliced objects using standard sequence rules."""
+        if isinstance(index, slice) or index < 0:
+            return list(self)[index]
+
         if not self._rows and not self.sort:
             # Fully materialized and already in order. Just look up the
             # object.
-            return self._objects[n]
+            return self._objects[index]
 
         it = iter(self)
         try:
-            for i in range(n):
+            for _ in range(index):
                 next(it)
             return next(it)
         except StopIteration:
-            raise IndexError(f"result index {n} out of range")
+            raise IndexError(f"result index {index} out of range")
 
     def get(self) -> AnyModel | None:
         """Return the first matching object, or None if no objects

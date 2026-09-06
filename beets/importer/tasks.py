@@ -4,16 +4,18 @@ import logging
 import os
 import re
 import shutil
+import tarfile
 import time
 from collections import defaultdict
 from collections.abc import Callable
+from functools import cached_property
 from tempfile import mkdtemp
-from typing import TYPE_CHECKING, Any, AnyStr
+from typing import TYPE_CHECKING, Any, AnyStr, Protocol, cast
 
 import mediafile
 
 from beets import config, library, plugins, util
-from beets.autotag import AlbumMatch, tag_album, tag_item
+from beets.autotag import AlbumMatch, Source, tag_album, tag_item
 from beets.dbcore.query import PathQuery
 from beets.util import extension
 from beets.util.extension import remux_mpeglayer3_wav
@@ -235,12 +237,15 @@ class ImportTask(BaseImportTask):
     choice_flag: Action | None = None
     match: AlbumMatch | TrackMatch | None = None
 
+    # Set by `group_albums` when items were grouped by tag, not by
+    # directory. No scope for a filesystem rescan, so the "Rescan
+    # directory" choice is withheld (see `_get_choices`).
+    is_grouped: bool = False
+
     # Set by `add()`; only valid afterwards (see class docstring).
     album: library.Album
 
     # Keep track of the current task item
-    cur_album: str | None = None
-    cur_artist: str | None = None
     candidates: Sequence[AlbumMatch | TrackMatch] | None = None
     rec: Recommendation | None = None
     duplicate_action: DuplicateAction | None = None
@@ -250,6 +255,10 @@ class ImportTask(BaseImportTask):
     # old albums to graft the kept new items onto.
     _upgrade_superseded: list[library.Item] | None = None
     _upgrade_old_albums: list[int] | None = None
+
+    @cached_property
+    def source(self) -> Source:
+        return Source.from_items(self.items)
 
     def __init__(
         self,
@@ -276,6 +285,7 @@ class ImportTask(BaseImportTask):
             Action.TRACKS,
             Action.ALBUMS,
             Action.RETAG,
+            Action.RESCAN,
         ):
             # TODO: redesign to stricten the type
             self.choice_flag = choice  # type: ignore[assignment]
@@ -317,8 +327,7 @@ class ImportTask(BaseImportTask):
         or APPLY (in which case the data comes from the choice).
         """
         if self.choice_flag in (Action.ASIS, Action.RETAG):
-            likelies, _ = util.get_most_common_tags(self.items)
-            return likelies
+            return self.source.data.copy()
         if self.choice_flag is Action.APPLY and self.match:
             return self.match.info.copy()
         assert False
@@ -553,8 +562,8 @@ class ImportTask(BaseImportTask):
         If User-specified ``search_ids`` list is not empty, the lookup is
         restricted to only those IDs.
         """
-        self.cur_artist, self.cur_album, (self.candidates, self.rec) = (
-            tag_album(self.items, search_ids=search_ids)
+        self.candidates, self.rec = tag_album(
+            self.source, search_ids=search_ids
         )
 
     def find_duplicates(self, lib: library.Library) -> list[library.Album]:
@@ -853,6 +862,10 @@ class ImportTask(BaseImportTask):
 class SingletonImportTask(ImportTask):
     """ImportTask for a single track that is not associated to an album."""
 
+    @cached_property
+    def source(self) -> Source:
+        return Source.from_item(self.item)
+
     def __init__(
         self, toppath: util.PathBytes | None, item: library.Item
     ) -> None:
@@ -860,19 +873,6 @@ class SingletonImportTask(ImportTask):
         self.item = item
         self.is_album = False
         self.paths = [item.path]
-
-    def chosen_info(self) -> dict[str, Any]:
-        """Return a dictionary of metadata about the current choice.
-        May only be called when the choice flag is ASIS or RETAG
-        (in which case the data comes from the files' current metadata)
-        or APPLY (in which case the data comes from the choice).
-        """
-        assert self.choice_flag in (Action.ASIS, Action.RETAG, Action.APPLY)
-        if self.choice_flag in (Action.ASIS, Action.RETAG):
-            return dict(self.item)
-        if self.choice_flag is Action.APPLY and self.match:
-            return self.match.info.copy()
-        assert False
 
     def imported_items(self) -> list[library.Item]:
         return [self.item]
@@ -900,7 +900,7 @@ class SingletonImportTask(ImportTask):
             plugins.send("item_imported", lib=lib, item=item)
 
     def lookup_candidates(self, search_ids: list[str]) -> None:
-        self.candidates, self.rec = tag_item(self.item, search_ids=search_ids)
+        self.candidates, self.rec = tag_item(self.source, search_ids=search_ids)
 
     def find_duplicates(self, lib: library.Library) -> list[library.Item]:  # type: ignore[override] # Need splitting Singleton and Album tasks into separate classes
         """Return a list of items from `lib` that have the same artist
@@ -1047,7 +1047,105 @@ class SentinelImportTask(ImportTask):
         pass
 
 
-ArchiveHandler = tuple[Callable[[util.StrPath], bool], Callable[..., Any]]
+class ArchiveMember(Protocol):
+    """The subset of ``zipfile.ZipInfo`` that
+    :meth:`ArchiveImportTask.extract` reads from each archive member.
+
+    Declared as read-only properties so the protocol is covariant: a member
+    exposing a narrower ``date_time`` (e.g. ``ZipInfo``'s six-int tuple) still
+    conforms.
+    """
+
+    @property
+    def filename(self) -> str: ...
+
+    @property
+    def date_time(self) -> tuple[int, ...]: ...
+
+
+class Archive(Protocol):
+    """The ``zipfile.ZipFile``-compatible interface that every archive handler
+    must expose for :meth:`ArchiveImportTask.extract`.
+
+    Typing the handler this way (rather than ``Any``) lets mypy verify each
+    registered handler still provides ``extractall``/``infolist``/``close`` —
+    an early warning if an upstream archive API changes.
+    """
+
+    def extractall(self, path: util.StrPath) -> None: ...
+
+    def infolist(self) -> Sequence[ArchiveMember]: ...
+
+    def close(self) -> None: ...
+
+
+ArchiveHandler = tuple[Callable[[util.StrPath], bool], Callable[..., Archive]]
+
+
+class _TarMemberInfo:
+    """Adapter exposing the ``ZipInfo``-compatible attributes
+    (``filename``, ``date_time``) that :meth:`ArchiveImportTask.extract`
+    expects when iterating archive members.
+    """
+
+    def __init__(self, member: tarfile.TarInfo) -> None:
+        self.filename = member.name
+        self.date_time = time.gmtime(member.mtime)[:6]
+
+
+class TarArchive(tarfile.TarFile):
+    """``tarfile.TarFile`` extended with an ``infolist`` method mirroring
+    ``zipfile.ZipFile`` so archive extraction can iterate uniformly across
+    handlers. ``TarFile.infolist`` existed in Python 2 via ``ZipFileCompat``
+    but was removed in Python 3.
+    """
+
+    @classmethod
+    def open(cls, *args: Any, **kwargs: Any) -> TarArchive:
+        # ``TarFile.open`` builds an instance of ``cls`` at runtime, so this
+        # really returns a ``TarArchive``; typeshed annotates it as the base
+        # ``TarFile`` (which lacks ``infolist``), so narrow it back here.
+        return cast(TarArchive, super().open(*args, **kwargs))
+
+    def infolist(self) -> list[_TarMemberInfo]:
+        return [_TarMemberInfo(m) for m in self.getmembers() if m.isfile()]
+
+
+class _SevenZipMemberInfo:
+    """Adapter exposing the ``ZipInfo``-compatible attributes used by
+    :meth:`ArchiveImportTask.extract` for ``py7zr.SevenZipFile`` members."""
+
+    def __init__(self, member: Any) -> None:
+        self.filename = member.filename
+        self.date_time = member.creationtime.timetuple()[:6]
+
+
+class SevenZipArchive:
+    """Wraps ``py7zr.SevenZipFile`` to expose the
+    ``zipfile.ZipFile``-compatible interface (``extractall``, ``infolist``,
+    ``close``) that archive extraction relies on. ``SevenZipFile`` itself
+    provides ``list()`` rather than ``infolist()``, so a thin adapter is
+    needed.
+
+    Composition (rather than subclassing) keeps the optional ``py7zr``
+    dependency lazy: the import only happens when a 7z archive is opened.
+    """
+
+    def __init__(self, path: util.StrPath, mode: str = "r") -> None:
+        import py7zr
+
+        self._archive = py7zr.SevenZipFile(path, mode=mode)
+
+    def extractall(self, path: util.StrPath) -> None:
+        self._archive.extractall(path=path)
+
+    def infolist(self) -> list[_SevenZipMemberInfo]:
+        return [
+            _SevenZipMemberInfo(m) for m in self._archive.list() if m.is_file
+        ]
+
+    def close(self) -> None:
+        self._archive.close()
 
 
 class ArchiveImportTask(SentinelImportTask):
@@ -1096,16 +1194,15 @@ class ArchiveImportTask(SentinelImportTask):
 
         Each handler is a `(path_test, ArchiveClass)` tuple. `path_test`
         is a function that returns `True` if the given path can be
-        handled by `ArchiveClass`. `ArchiveClass` is a class that
-        implements the same interface as `tarfile.TarFile`.
+        handled by `ArchiveClass`. `ArchiveClass` is a callable that opens
+        the archive and returns an object conforming to the `Archive`
+        protocol (`extractall`/`infolist`/`close`).
         """
         _handlers: list[ArchiveHandler] = []
         from zipfile import ZipFile, is_zipfile
 
         _handlers.append((is_zipfile, ZipFile))
-        import tarfile
-
-        _handlers.append((tarfile.is_tarfile, tarfile.open))
+        _handlers.append((tarfile.is_tarfile, TarArchive.open))
         try:
             from rarfile import RarFile, is_rarfile
         except ImportError:
@@ -1113,11 +1210,11 @@ class ArchiveImportTask(SentinelImportTask):
         else:
             _handlers.append((is_rarfile, RarFile))
         try:
-            from py7zr import SevenZipFile, is_7zfile
+            from py7zr import is_7zfile
         except ImportError:
             pass
         else:
-            _handlers.append((is_7zfile, SevenZipFile))
+            _handlers.append((is_7zfile, SevenZipArchive))
 
         return _handlers
 
@@ -1179,10 +1276,14 @@ class ArchiveImportTask(SentinelImportTask):
             for f in archive.infolist():
                 # The date_time will need to adjusted otherwise
                 # the item will have the current date_time of extraction.
-                # The (0, 0, -1) is added to date_time because the
-                # function time.mktime expects a 9-element tuple.
-                # The -1 indicates that the DST flag is unknown.
-                date_time = time.mktime((*f.date_time, 0, 0, -1))
+                # date_time is (year, month, day, hour, minute, second); the
+                # trailing (0, 0, -1) pads it to the 9-element tuple
+                # time.mktime expects. The -1 indicates the DST flag is
+                # unknown.
+                year, month, day, hour, minute, second = f.date_time
+                date_time = time.mktime(
+                    (year, month, day, hour, minute, second, 0, 0, -1)
+                )
                 fullpath = os.path.join(extract_to, f.filename)
                 os.utime(fullpath, (date_time, date_time))
 

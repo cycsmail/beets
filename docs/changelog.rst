@@ -12,9 +12,19 @@ Unreleased
 New features
 ~~~~~~~~~~~~
 
+- :doc:`plugins/plexupdate`: Add ``beet plexupdate --auth``, an interactive
+  plex.tv login following Plex' traditional PIN authentication flow: the access
+  token for the local server is stored in a token file. The manual ``token``
+  configuration option is now deprecated.
 - :ref:`duplicate_action`: Add an ``upgrade`` option that replaces individual
   duplicate tracks only if the new copy has a higher bitrate, adds any genuinely
-  new tracks, and keeps the album together rather than splitting it. :bug:`4471`
+  new tracks, and keeps the album together rather than splitting it. The option
+  is available both through configuration and from the interactive duplicate
+  prompt. :bug:`4471`
+- The interactive import prompt now offers a "Rescan directory" choice for album
+  tasks. It re-reads the album's directory from disk and re-runs the match, so
+  files can be cleaned up (duplicates, junk) while the import is paused at the
+  prompt, without restarting the whole ``beet import`` run.
 
 Bug fixes
 ~~~~~~~~~
@@ -50,6 +60,59 @@ Bug fixes
   relevance order and truncated to ``search_limit``. For artists with more
   releases than that window, the track being imported was never among the
   candidates offered.
+- :doc:`plugins/tidal`: The ``label`` field no longer stores Tidal's raw
+  copyright/rights-statement text verbatim. It's now normalized to a concise
+  label name, stripping copyright markers, years, and corporate, licensing, and
+  territorial boilerplate. Affects both album and track metadata. :bug:`6796`
+- :doc:`plugins/deezer`: Track conversion no longer assumes the API sends both
+  ``contributors`` and ``artist``. The fallback to ``artist`` was evaluated even
+  when ``contributors`` was present, so a track payload without ``artist``
+  raised ``KeyError``. Albums were already guarded; this fixes the remaining
+  call site. :bug:`4339`
+- :doc:`plugins/discogs`: Retry a search once when Discogs returns an invalid
+  JSON response instead of immediately discarding all Discogs candidates.
+- Plugins built on ``SearchApiMetadataSourcePlugin``
+  (:doc:`plugins/musicbrainz`, :doc:`plugins/spotify`, :doc:`plugins/deezer` and
+  :doc:`plugins/discogs`) no longer send a search request when both the query
+  text and the filters are empty. :bug:`6862`
+- :doc:`plugins/ipfs`: Fix ``beet ipfs --play`` option to invoke the Play plugin
+  through its command interface.
+- :doc:`plugins/lyrics`: LRCLib entries that carry no lyrics text at all, with
+  both ``plainLyrics`` and ``syncedLyrics`` null while ``instrumental`` is
+  ``False``, are no longer considered matches. Previously such an entry was
+  accepted and its null text propagated, raising ``AttributeError: 'NoneType'
+  object has no attribute 'splitlines'``. During an import this aborted the
+  whole run rather than a single track. A null ``plainLyrics`` now also falls
+  back to the synced lyrics instead of discarding them.
+- :ref:`modify-cmd`: Fix applying changes when choosing objects in interactive
+  select mode. :bug:`4880`
+- :ref:`move-cmd`: Fix moving albums in interactive select/timid mode.
+  :bug:`2802`
+- :doc:`plugins/bpd`: Fix ``search`` command when ``any`` field is used.
+- :doc:`plugins/aura`: Prevent multi-valued field filters from crashing with an
+  ``sqlite3.InterfaceError``.
+- :doc:`plugins/aura`: When sorting by ``field``, do not exclude resources that
+  have no value for ``field``.
+- :doc:`plugins/scrub`: The scrub plugin now respects the ``--nowrite`` (``-W``)
+  flag during import. Previously, ``beet import -W`` with the scrub plugin
+  enabled would still remove tags from imported files; the plugin now skips
+  scrubbing when ``should_write()`` returns ``False``. :bug:`6958`
+- :doc:`plugins/convert`: Fixed convert plugin not taking into account the new
+  format when determining the target path. :bug:`1360`
+- :doc:`plugins/edit`: Item-only fields rejected from the album header remain
+  available in per-track documents during interactive import when they are also
+  configured in ``itemfields``. :bug:`6953`
+- :doc:`plugins/tidal`: Pass the converted track duration as ``length`` so it
+  contributes to the autotagging track-length distance instead of being silently
+  stored as a ``duration`` flexible attribute.
+- :doc:`plugins/tidal`: Restore catalog searches after TIDAL moved search
+  queries from the request path to the required ``filter[query]`` parameter.
+  :bug:`6989`
+- :ref:`import-cmd`: Restore the ability to import from tar and 7z archives.
+  Both failed with an ``'... object has no attribute 'infolist'`` error because
+  ``tarfile.TarFile`` lost its ``ZipFileCompat`` interface in Python 3 and
+  ``py7zr.SevenZipFile`` exposes ``list()`` rather than ``infolist()``.
+  :bug:`5664`
 
 ..
     For plugin developers
@@ -58,6 +121,8 @@ Bug fixes
 Other changes
 ~~~~~~~~~~~~~
 
+- :doc:`plugins/bpd`: Replace the bundled Bluelet scheduler with Python's
+  standard ``asyncio`` event loop.
 - :doc:`plugins/duplicates`: Improve the documentation of the ``checksum``
   option: explain how the external command is run, remove the broken ``md5sum
   {file}`` example and show how to use such commands through a wrapper script.

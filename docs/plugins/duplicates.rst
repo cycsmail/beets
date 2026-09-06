@@ -50,8 +50,8 @@ file. The available options mirror the command-line options:
   ``keys`` configuration option) the second time around. The command is not run
   through a shell: it is split into arguments (respecting shell-like quoting)
   and ``{file}`` is then replaced with the item's path within each argument, so
-  paths containing spaces need no extra quoting, but shell features such as
-  pipes or redirection cannot be used. The command's entire output is used as
+  paths containing spaces need no extra quoting. **Note: shell features such as
+  pipes or redirection cannot be used.** The command's entire output is used as
   the checksum, so it must not contain anything that differs between copies of
   the same file, such as the file's path. Default: ``ffmpeg -i {file} -f crc
   -``.
@@ -135,7 +135,7 @@ Get tracks with the same title, artist, and album:
 Compute Adler CRC32 checksums, storing them as flexattrs, and report back
 duplicates based on those values:
 
-::
+.. code-block:: bash
 
     beet dup -C 'ffmpeg -i {file} -f crc -'
 
@@ -144,14 +144,14 @@ output is used as the checksum, and ``md5sum`` prints the file's path after the
 hash, so copies of the same file at different paths would never match. Instead,
 wrap the command in a script that prints only the hash:
 
-::
+.. code-block:: bash
 
     #!/bin/sh
     md5sum "$1" | awk '{print $1}'
 
 and use that script as the checksum command:
 
-::
+.. code-block:: bash
 
     beet dup -C 'myscript {file}'
 
